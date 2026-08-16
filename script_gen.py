@@ -1,5 +1,6 @@
-from utils.best_args import best_args
 import argparse
+
+from utils.best_args import best_args
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--severity", type=int, default=1)
@@ -20,16 +21,22 @@ if __name__ == "__main__":
 
     datasets = [
         "perm-mnist",
+        "rot-mnist",
         "seq-mnist",
         "seq-cifar100",
+        "cifar100-c",
         "seq-cifar10",
+        "cifar10-c",
     ]
-    models = [ "gem", "agem", "der", "derpp", "xder"] #"ewc_on",
+    models = ["gem", "agem", "der", "derpp", "xder"]  # "ewc_on",
     data_backbone = {
         "perm-mnist": ["mnistmlp", "mnistmlp-pnn"],
+        "rot-mnist": ["mnistmlp", "mnistmlp-pnn"],
         "seq-mnist": ["mnistmlp", "mnistmlp-pnn"],
         "seq-cifar100": ["reduced-resnet18", "resnet18-pnn"],
+        "cifar100-c": ["reduced-resnet18", "resnet18-pnn"],
         "seq-cifar10": ["reduced-resnet18", "resnet18-pnn"],
+        "cifar10-c": ["reduced-resnet18", "resnet18-pnn"],
     }
     with open("args.txt", "a") as f:
         for data in datasets:

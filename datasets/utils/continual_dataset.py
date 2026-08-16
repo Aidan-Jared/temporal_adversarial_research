@@ -12,10 +12,11 @@ import torch.nn as nn
 import torch.utils
 from torch.utils.data import DataLoader, Dataset
 
+# from matplotlib.pyplot import imsave
 from datasets.utils import build_torchvision_transform
+from datasets.utils.image_corputions import corruption_dict
 from datasets.utils.label_noise import build_noisy_labels
 from datasets.utils.validation import get_validation_indexes
-from datasets.utils.image_corputions import corruption_dict
 from utils import check_fn_dynamic_type
 from utils.bias import evaluate_with_bias
 from utils.conf import create_seeded_dataloader
@@ -648,7 +649,7 @@ def store_masked_loaders(
         # add poision around here
         if (
             hasattr(setting.args, "poison_task")
-            and setting.c_task in setting.args.poison_task
+            and setting.current_task in setting.args.poison_task
         ):
             train_dataset.data[train_mask], p_indicies = poison_dataset(
                 train_dataset.data[train_mask],
@@ -656,6 +657,7 @@ def store_masked_loaders(
                 train_dataset.indexes[train_mask],
                 setting,
             )
+
             if p_indicies is not None:
                 train_dataset.p_indicies = p_indicies
 
@@ -679,12 +681,12 @@ def store_masked_loaders(
     else:
         if (
             hasattr(setting.args, "poison_task")
-            and setting.c_task in setting.args.poison_task
+            and setting.current_task in setting.args.poison_task
         ):
-            train_dataset.data[train_mask], p_indicies = poison_dataset(
-                train_dataset.data[train_mask],
-                train_dataset.targets[train_mask],
-                train_dataset.indexes[train_mask],
+            train_dataset.data, p_indicies = poison_dataset(
+                train_dataset.data,
+                train_dataset.targets,
+                train_dataset.indexes,
                 setting,
             )
             if p_indicies is not None:

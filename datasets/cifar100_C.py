@@ -1,0 +1,162 @@
+# Copyright 2022-present, Lorenzo Bonicelli, Pietro Buzzega, Matteo Boschini, Angelo Porrello, Simone Calderara.
+# All rights reserved.
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+from argparse import Namespace
+from typing import Tuple
+
+import torch.nn.functional as F
+import torch.optim
+import torchvision.transforms as transforms
+from PIL import Image
+from torchvision.datasets import CIFAR100
+
+from backbone.ResNetBlock import resnet18
+from datasets.seq_cifar100 import TCIFAR100, MyCIFAR100
+from datasets.transforms.denormalization import DeNormalize
+from datasets.utils import set_default_from_args
+from datasets.utils.continual_dataset import (
+    ContinualDataset,
+    fix_class_names_order,
+    store_masked_loaders,
+)
+from datasets.utils.image_corputions import corruption_dict
+from utils.conf import base_path
+
+
+class CIFAR100Corrupted(ContinualDataset):
+    """Sequential CIFAR100 Dataset.
+
+    Args:
+        NAME (str): name of the dataset.
+        SETTING (str): setting of the dataset.
+        N_CLASSES_PER_TASK (int): number of classes per task.
+        N_TASKS (int): number of tasks.
+        N_CLASSES (int): number of classes.
+        SIZE (tuple): size of the images.
+        MEAN (tuple): mean of the dataset.
+        STD (tuple): standard deviation of the dataset.
+        TRANSFORM (torchvision.transforms): transformation to apply to the data."""
+
+    NAME = "cifar100-c"
+    SETTING = "domain-il"
+    N_CLASSES_PER_TASK = 100
+    N_TASKS = 20
+    # N_CLASSES = N_CLASSES_PER_TASK * N_TASKS
+    SIZE = (32, 32)
+    MEAN, STD = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
+    TRANSFORM = transforms.Compose(
+        [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(MEAN, STD),
+        ]
+    )
+
+    TASK_CORRUPTIONS = {
+        0: "gaussian_noise",
+        1: "shot_noise",
+        2: "impulse_noise",
+        3: "defocus_blur",
+        4: "gaussian_blur",
+        5: "motion_blur",
+        6: "speckle_noise",
+        7: "jpeg_compression",
+        8: "pixelate",
+        9: "frost",
+        10: "snow",
+        11: "fog",
+        12: "spatter",
+        13: "contrast",
+        14: "brightness",
+        15: "saturate",
+        16: "elastic_transform",
+        17: "glass_blur",
+        18: "zoom_blur",
+        19: "clean",
+    }
+
+    SEVERITY = 2
+
+    def get_data_loaders(
+        self,
+    ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+        transform = self.TRANSFORM
+
+        test_transform = transforms.Compose(
+            [transforms.ToTensor(), self.get_normalization_transform()]
+        )
+
+        train_dataset = MyCIFAR100(
+            base_path() + "CIFAR100", train=True, download=True, transform=transform
+        )
+        test_dataset = TCIFAR100(
+            base_path() + "CIFAR100",
+            train=False,
+            download=True,
+            transform=test_transform,
+        )
+
+        corruption = self.TASK_CORRUPTIONS[self.current_task]
+
+        train_dataset.data = corruption_dict[corruption](
+            train_dataset.data, self.SEVERITY
+        )
+        test_dataset.data = corruption_dict[corruption](
+            test_dataset.data, self.SEVERITY
+        )
+
+        train, test = store_masked_loaders(train_dataset, test_dataset, self)
+
+        return train, test
+
+    @staticmethod
+    def get_transform():
+        transform = transforms.Compose(
+            [transforms.ToPILImage(), CIFAR100Corrupted.TRANSFORM]
+        )
+        return transform
+
+    @set_default_from_args("backbone")
+    def get_backbone():
+        return "resnet18"
+
+    @staticmethod
+    def get_loss():
+        return F.cross_entropy
+
+    @staticmethod
+    def get_normalization_transform():
+        transform = transforms.Normalize(CIFAR100Corrupted.MEAN, CIFAR100Corrupted.STD)
+        return transform
+
+    @staticmethod
+    def get_denormalization_transform():
+        transform = DeNormalize(CIFAR100Corrupted.MEAN, CIFAR100Corrupted.STD)
+        return transform
+
+    @set_default_from_args("n_epochs")
+    def get_epochs():
+        return 50
+
+    @set_default_from_args("batch_size")
+    def get_batch_size():
+        return 32
+
+    @set_default_from_args("lr_scheduler")
+    def get_scheduler_name():
+        return "multisteplr"
+
+    @set_default_from_args("lr_milestones")
+    def get_scheduler_name():
+        return [35, 45]
+
+    def get_class_names(self):
+        if self.class_names is not None:
+            return self.class_names
+        classes = CIFAR100(base_path() + "CIFAR100", train=True, download=True).classes
+        classes = fix_class_names_order(classes, self.args)
+        self.class_names = classes
+        return self.class_names

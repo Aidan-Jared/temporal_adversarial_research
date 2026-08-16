@@ -1,14 +1,17 @@
-import numpy as np
-import cv2
-from PIL import Image as PILImage
-from io import BytesIO
-from skimage.filters import gaussian
-import skimage as sk
-from scipy.ndimage import zoom as scizoom
-from scipy.ndimage import map_coordinates
-from wand.image import Image as WandImage
-from wand.api import library as wandlibrary
 import ctypes
+from io import BytesIO
+
+import cv2
+import numpy as np
+import skimage as sk
+import torch
+from accelerate.commands.menu.input import mark
+from PIL import Image as PILImage
+from scipy.ndimage import map_coordinates
+from scipy.ndimage import zoom as scizoom
+from skimage.filters import gaussian
+from wand.api import library as wandlibrary
+from wand.image import Image as WandImage
 
 # Setup for Wand's motion blur
 wandlibrary.MagickMotionBlurImage.argtypes = (
@@ -103,6 +106,18 @@ def clipped_zoom(img, zoom_factor):
     return img[trim_top : trim_top + h, trim_left : trim_left + w]
 
 
+def dtype_helper(x: torch.Tensor, marker=None):
+    if marker is None:
+        if x.dtype == np.uint8:
+            return np.array(x) / 255.0, np.uint8
+        else:
+            return x, x.dtype
+    elif marker == np.uint8:
+        return (np.clip(x, 0, 1) * 255).astype(marker)
+    else:
+        return np.clip(x, 0.0, 1.0)
+
+
 # === Corruption Functions ===
 
 
@@ -113,47 +128,52 @@ def test(x, severity=1):
 
 def gaussian_noise(x, severity=1):
     c = [0.04, 0.06, 0.08, 0.09, 0.10][severity - 1]
-    x = np.array(x) / 255.0
-    return np.clip(x + np.random.normal(size=x.shape, scale=c), 0, 1) * 255
+    x, marker = dtype_helper(x)
+    x += np.random.normal(size=x.shape, scale=c)
+    return dtype_helper(x, marker)
 
 
 def shot_noise(x, severity=1):
     c = [500, 250, 100, 75, 50][severity - 1]
-    x = np.array(x) / 255.0
-    return np.clip(np.random.poisson(x * c) / c, 0, 1) * 255
+    x, marker = dtype_helper(x)
+    return dtype_helper(np.random.poisson(x * c) / c, marker)
 
 
 def impulse_noise(x, severity=1):
     c = [0.01, 0.02, 0.03, 0.05, 0.07][severity - 1]
-    return (
-        np.clip(sk.util.random_noise(np.array(x) / 255.0, mode="s&p", amount=c), 0, 1)
-        * 255
-    )
+    x, marker = dtype_helper(x)
+    return dtype_helper(sk.util.random_noise(x, mode="s&p", amount=c), marker)
 
 
 def speckle_noise(x, severity=1):
     c = [0.06, 0.1, 0.12, 0.16, 0.2][severity - 1]
-    x = np.array(x) / 255.0
-    return np.clip(x + x * np.random.normal(size=x.shape, scale=c), 0, 1) * 255
+    x, marker = dtype_helper(x)
+
+    return dtype_helper(x + x * np.random.normal(size=x.shape, scale=c), marker)
 
 
 def gaussian_blur(x, severity=1):
     c = [0.4, 0.6, 0.7, 0.8, 1][severity - 1]
-    x = gaussian(np.array(x) / 255.0, sigma=c, channel_axis=-1)
-    return np.clip(x, 0, 1) * 255
+    x, marker = dtype_helper(x)
+    return dtype_helper(gaussian(x, sigma=c, channel_axis=1), marker)
 
 
 def defocus_blur(x, severity=1):
     c = [(0.3, 0.4), (0.4, 0.5), (0.5, 0.6), (1, 0.2), (1.5, 0.1)][severity - 1]
-    x = np.array(x) / 255.0
+    x, marker = dtype_helper(x)
     radius = int(c[0] * x.shape[0])  # scale by image size
     kernel = disk(radius=radius, alias_blur=c[1])
     channels = [cv2.filter2D(x[:, :, d], -1, kernel) for d in range(3)]
-    return np.clip(np.stack(channels, axis=-1), 0, 1) * 255
+    return dtype_helper(np.stack(channels, axis=-1), marker)
 
 
 def motion_blur(x, severity=1):
     c = [(6, 1), (6, 1.5), (6, 2), (8, 2), (9, 2.5)][severity - 1]
+    was_float = False
+    if x.dtype == torch.float32:
+        x = x * 255
+        x.to(torch.uint8)
+        was_float = True
 
     # numpy array → PNG bytes directly
     x_bgr = x[..., [2, 1, 0]]  # RGB → BGR for cv2
@@ -165,12 +185,21 @@ def motion_blur(x, severity=1):
     x = cv2.imdecode(np.frombuffer(x.make_blob(), np.uint8), cv2.IMREAD_UNCHANGED)
     if x.ndim == 2:
         x = np.stack([x] * 3, axis=-1)
+    if was_float:
+        return np.clip(x[..., [2, 1, 0]] / 255, 0, 1)
     return np.clip(x[..., [2, 1, 0]], 0, 255)
 
 
 def jpeg_compression(x, severity=1):
+    was_float = False
+    if x.dtype == torch.float32:
+        was_float = True
     c = [80, 65, 58, 50, 40][severity - 1]
     _, encoded = cv2.imencode(".jpg", x[..., [2, 1, 0]], [cv2.IMWRITE_JPEG_QUALITY, c])
+    if was_float:
+        return np.clip(
+            cv2.imdecode(encoded, cv2.IMREAD_COLOR)[..., [2, 1, 0]] / 255, 1, 0
+        )
     return cv2.imdecode(encoded, cv2.IMREAD_COLOR)[..., [2, 1, 0]]
 
 
@@ -196,8 +225,8 @@ def frost(x, severity=1):
     y0 = np.random.randint(0, fh - H + 1)
     x0 = np.random.randint(0, fw - W + 1)
     frost_crop = frost_img[y0 : y0 + H, x0 : x0 + W][..., ::-1] / 255.0  # BGR→RGB
-    x_arr = x / 255.0
-    return np.clip(c[0] * x_arr + c[1] * frost_crop, 0, 1) * 255
+    x_arr, marker = dtype_helper(x)
+    return dtype_helper(c[0] * x_arr + c[1] * frost_crop, marker)
 
 
 def snow(x, severity=1):
@@ -208,7 +237,7 @@ def snow(x, severity=1):
         (0.25, 0.3, 2.25, 0.6, 12, 6, 0.85),
         (0.3, 0.3, 1.25, 0.65, 14, 12, 0.8),
     ][severity - 1]
-    x_arr = x.astype(np.float32) / 255.0
+    x_arr, marker = dtype_helper(x)
     H, W = x_arr.shape[:2]
     snow_layer = np.random.normal(loc=c[0], scale=c[1], size=(H, W))[..., None]
     snow_layer = clipped_zoom(snow_layer, c[2])
@@ -227,18 +256,18 @@ def snow(x, severity=1):
     arr = arr[..., None]
     gray = cv2.cvtColor(x_arr, cv2.COLOR_RGB2GRAY)[..., None]
     x_mod = c[6] * x_arr + (1 - c[6]) * np.maximum(x_arr, gray * 1.5 + 0.5)
-    return np.clip(x_mod + arr + np.rot90(arr, 2), 0, 1) * 255
+    return dtype_helper(x_mod + arr + np.rot90(arr, 2), marker)
 
 
 def fog(x, severity=1):
     c = [(0.2, 3), (0.5, 3), (0.75, 2.5), (1, 2), (1.5, 1.75)][severity - 1]
-    x_arr = np.array(x) / 255.0
+    x_arr, marker = dtype_helper(x)
     H, W = x_arr.shape[:2]
     max_val = x_arr.max()
     fog_layer = plasma_fractal(mapsize=256, wibbledecay=int(c[1]))
     fog_crop = fog_layer[:H, :W][..., None]
     x_mod = x_arr + c[0] * fog_crop
-    return np.clip(x_mod * max_val / (max_val + c[0]), 0, 1) * 255
+    return dtype_helper(x_mod * max_val / (max_val + c[0]), marker)
 
 
 def spatter(x, severity=1):
@@ -250,7 +279,7 @@ def spatter(x, severity=1):
         (0.65, 0.1, 0.5, 0.68, 0.6, 1),
     ][severity - 1]
 
-    x = np.array(x, dtype=np.float32) / 255.0
+    x, marker = dtype_helper(x)
     H, W = x.shape[:2]
     liquid = np.random.normal(loc=c[0], scale=c[1], size=(H, W))
 
@@ -281,7 +310,7 @@ def spatter(x, severity=1):
             axis=-1,
         )
 
-        return np.clip(x + m * color, 0, 1) * 255
+        return dtype_helper(x + m * color, marker)
 
     else:
         m = (liquid > c[3]).astype(np.float32)
@@ -299,30 +328,30 @@ def spatter(x, severity=1):
 
         color = mud * m[..., None]
         x *= 1 - m[..., None]
-        return np.clip(x + color, 0, 1) * 255
+        return dtype_helper(x + m * color, marker)
 
 
 def contrast(x, severity=1):
     c = [0.75, 0.5, 0.4, 0.3, 0.15][severity - 1]
-    x = np.array(x) / 255.0
+    x, marker = dtype_helper(x)
     means = np.mean(x, axis=(0, 1), keepdims=True)
-    return np.clip((x - means) * c + means, 0, 1) * 255
+    return dtype_helper((x - means) * c + means, marker)
 
 
 def brightness(x, severity=1):
     c = [0.05, 0.1, 0.15, 0.2, 0.3][severity - 1]
-    x = np.array(x) / 255.0
+    x, marker = dtype_helper(x)
     hsv = sk.color.rgb2hsv(x)
     hsv[..., 2] = np.clip(hsv[..., 2] + c, 0, 1)
-    return np.clip(sk.color.hsv2rgb(hsv), 0, 1) * 255
+    return dtype_helper(sk.color.hsv2rgb(hsv), marker)
 
 
 def saturate(x, severity=1):
     c = [(0.3, 0), (0.1, 0), (1.5, 0), (2, 0.1), (2.5, 0.2)][severity - 1]
-    x = np.array(x) / 255.0
+    x, marker = dtype_helper(x)
     hsv = sk.color.rgb2hsv(x)
     hsv[..., 1] = np.clip(hsv[..., 1] * c[0] + c[1], 0, 1)
-    return np.clip(sk.color.hsv2rgb(hsv), 0, 1) * 255
+    return dtype_helper(sk.color.hsv2rgb(hsv), marker)
 
 
 def elastic_transform(image, severity=1):
@@ -335,7 +364,8 @@ def elastic_transform(image, severity=1):
         (IMSIZE * 0.1, IMSIZE * 0.03, IMSIZE * 0.03),
     ][severity - 1]
 
-    image = np.array(image, dtype=np.float32) / 255.0
+    image, marker = dtype_helper(image)
+
     shape = image.shape
     shape_size = shape[:2]
 
@@ -370,13 +400,8 @@ def elastic_transform(image, severity=1):
         np.reshape(z, (-1, 1)),
     )
 
-    return (
-        np.clip(
-            map_coordinates(image, indices, order=1, mode="reflect").reshape(shape),
-            0,
-            1,
-        )
-        * 255
+    return dtype_helper(
+        map_coordinates(image, indices, order=1, mode="reflect").reshape(shape), marker
     )
 
 
@@ -387,7 +412,7 @@ def glass_blur(x, severity=1):
     ]
     sigma, delta, iterations = c
 
-    x = np.array(x) / 255.0
+    x, marker = dtype_helper(x)
     x = np.clip(gaussian(x, sigma=sigma, channel_axis=-1), 0, 1)
     x = np.uint8(x * 255)
 
@@ -404,7 +429,7 @@ def glass_blur(x, severity=1):
                     x[h_new, w_new] = tmp
 
     x = x / 255.0
-    return np.clip(gaussian(x, sigma=sigma, channel_axis=-1), 0, 1) * 255
+    return dtype_helper(gaussian(x, sigma=sigma, channel_axis=-1), marker)
 
 
 def zoom_blur(x, severity=1):
@@ -416,13 +441,13 @@ def zoom_blur(x, severity=1):
         np.arange(1, 1.26, 0.01),
     ][severity - 1]
 
-    x = (np.array(x) / 255.0).astype(np.float32)
+    x, marker = dtype_helper(x)
     out = np.zeros_like(x)
     for zoom_factor in c:
         out += clipped_zoom(x, zoom_factor)
 
     x = (x + out) / (len(c) + 1)
-    return np.clip(x, 0, 1) * 255
+    return dtype_helper(x, marker)
 
 
 def clean(x, severity=1):

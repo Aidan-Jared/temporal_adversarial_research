@@ -339,7 +339,7 @@ def train(
                     model.meta_begin_epoch(epoch, dataset)
 
                     train_pbar.set_description(
-                        f"Task {cur_task + 1} - Epoch {epoch + 1}"
+                        f"Model: {model.NAME} Dataset: {dataset.NAME} Severity: {dataset.args.severity} {cur_task + 1} - Epoch {epoch + 1}"
                     )
 
                     train_single_epoch(
